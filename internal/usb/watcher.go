@@ -18,6 +18,8 @@ type Watcher struct {
 	usbCtx       *gousb.Context
 
 	activeDeviceHandle *gousb.Device // Track single device handle for MVP
+
+	diag diagState // idle-state diagnostics (log on change only)
 }
 
 // NewWatcher creates a new Watcher bound to a polling interval.
@@ -89,7 +91,13 @@ func (w *Watcher) pollLoop() {
 				continue
 			}
 
+			// Devices worth reporting while idle are collected as a side effect;
+			// matching itself is unchanged.
+			var seen []seenDevice
 			devs, err := w.usbCtx.OpenDevices(func(desc *gousb.DeviceDesc) bool {
+				if sd, ok := describeDesc(desc); ok {
+					seen = append(seen, sd)
+				}
 				for _, cfg := range desc.Configs {
 					for _, intf := range cfg.Interfaces {
 						for _, alt := range intf.AltSettings {
@@ -125,6 +133,11 @@ func (w *Watcher) pollLoop() {
 			}
 			scanErrStreak = 0
 
+			if len(devs) == 0 {
+				w.diag.reportWaiting(seen)
+				continue
+			}
+
 			if len(devs) > 0 {
 				log.Debug().
 					Str("component", "usb").
@@ -135,15 +148,20 @@ func (w *Watcher) pollLoop() {
 					devs[i].Close()
 				}
 
+				candidateInfo, _ := describeDesc(candidate.Desc)
 				deviceWrapper, err := NewDevice(candidate)
 				if err != nil {
-					log.Warn().
-						Str("component", "usb").
-						Err(err).
-						Msg("Failed to initialize Android RNDIS device wrapper")
+					w.diag.reportClaimFailure(err, candidateInfo)
 					candidate.Close()
 					continue
 				}
+				log.Info().
+					Str("component", "usb").
+					Str("device", candidateInfo.id()).
+					Str("interfaces", candidateInfo.Intfs).
+					Msg("Claimed Android RNDIS interface")
+				// Speak again about the idle state once this session ends.
+				w.diag.lastMsg, w.diag.claimMsg = "", ""
 
 				w.activeDeviceHandle = candidate
 				if w.onAttachFn != nil {

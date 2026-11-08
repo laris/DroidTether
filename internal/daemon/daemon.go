@@ -82,9 +82,12 @@ func (d *Daemon) Run() error {
 		phoneMAC, err := session.Handshake()
 		if err != nil {
 			handshakeFails++
-			log.Error().Str("component", "daemon").Err(err).
-				Int("consecutive", handshakeFails).
-				Msg("RNDIS Handshake failed")
+			ev := log.Error().Str("component", "daemon").Err(err).
+				Int("consecutive", handshakeFails)
+			if hint := dev.TetheringHint(); hint != "" {
+				ev = ev.Str("hint", hint)
+			}
+			ev.Msg("RNDIS Handshake failed")
 			// After a Mac sleep Android typically disables USB
 			// tethering itself: the phone still enumerates the RNDIS
 			// config but its gadget never answers INIT. Only the user
@@ -207,10 +210,10 @@ func (d *Daemon) Run() error {
 
 	// Start the USB hotplug watcher
 	watcher.Start()
-	log.Debug().
+	log.Info().
 		Str("component", "daemon").
 		Dur("poll_interval", pollInterval).
-		Msg("USB watcher started. Waiting for devices...")
+		Msg("USB watcher started")
 
 	// Block until graceful shutdown signal
 	sigChan := make(chan os.Signal, 1)
