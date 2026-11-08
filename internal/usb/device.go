@@ -30,7 +30,7 @@ func NewDevice(dev *gousb.Device) (*Device, error) {
 					if targetConfigNum == -1 || uint8(altDesc.Class) == RNDISClass {
 						targetConfigNum = cfgDesc.Number
 						targetInterfaceNum = intfDesc.Number
-						targetAltSettingNum = altDesc.Number
+						targetAltSettingNum = altDesc.Alternate
 						foundInConfig = true
 					}
 				}
@@ -73,26 +73,34 @@ func NewDevice(dev *gousb.Device) (*Device, error) {
 
 	// 5. Proactively find and claim the Data interface.
 	// Many devices (Samsung) require the data interface to be claimed before the RNDIS handshake finishes.
-	for _, intfDesc := range usbc.Desc.Interfaces {
-		if intfDesc.Number == targetInterfaceNum {
-			continue
-		}
-		for _, alt := range intfDesc.AltSettings {
-			// Search for RNDIS Data (Class 0x0A) or general vendor-specific data
-			class := uint8(alt.Class)
-			if class == 0x0A || class == 0xFF || class == 0xEF {
-				if len(alt.Endpoints) >= 2 {
-					fmt.Printf("USB DEBUG: Proactively claiming Data Intf %d Alt %d\n", intfDesc.Number, alt.Number)
-					dataIntf, err := usbc.Interface(intfDesc.Number, alt.Number)
-					if err == nil {
-						d.dataIntf = dataIntf
-						break
-					}
-				}
+	// Pass 1 takes a CDC-Data (0x0A) interface; pass 2 falls back to vendor-specific
+	// classes. The ADB function is skipped: it has a bulk pair but is never RNDIS data.
+	for pass := 1; pass <= 2 && d.dataIntf == nil; pass++ {
+		for _, intfDesc := range usbc.Desc.Interfaces {
+			if intfDesc.Number == targetInterfaceNum {
+				continue
 			}
-		}
-		if d.dataIntf != nil {
-			break
+			for _, alt := range intfDesc.AltSettings {
+				class := uint8(alt.Class)
+				wanted := class == 0x0A
+				if pass == 2 {
+					wanted = (class == 0xFF || class == 0xEF) && !isADB(alt)
+				}
+				if !wanted || len(alt.Endpoints) < 2 {
+					continue
+				}
+				fmt.Printf("USB DEBUG: Proactively claiming Data Intf %d Alt %d\n", alt.Number, alt.Alternate)
+				dataIntf, err := usbc.Interface(alt.Number, alt.Alternate)
+				if err != nil {
+					fmt.Printf("USB DEBUG: claim of Data Intf %d Alt %d failed: %v\n", alt.Number, alt.Alternate, err)
+					continue
+				}
+				d.dataIntf = dataIntf
+				break
+			}
+			if d.dataIntf != nil {
+				break
+			}
 		}
 	}
 
@@ -136,12 +144,12 @@ func (d *Device) OpenBulkEndpoints() (in *gousb.InEndpoint, out *gousb.OutEndpoi
 				continue
 			}
 			for _, alt := range intfDesc.AltSettings {
-				if len(alt.Endpoints) >= 2 {
-					fmt.Printf("USB DEBUG: Try claim intf %d alt %d\n", intfDesc.Number, alt.Number)
-					intf, err := d.usbc.Interface(intfDesc.Number, alt.Number)
+				if len(alt.Endpoints) >= 2 && !isADB(alt) {
+					fmt.Printf("USB DEBUG: Try claim intf %d alt %d\n", intfDesc.Number, alt.Alternate)
+					intf, err := d.usbc.Interface(intfDesc.Number, alt.Alternate)
 					if err != nil {
-						fmt.Printf("USB DEBUG: failed to claim intf %d alt %d: %v\n", intfDesc.Number, alt.Number, err)
-						if alt.Number != 0 {
+						fmt.Printf("USB DEBUG: failed to claim intf %d alt %d: %v\n", intfDesc.Number, alt.Alternate, err)
+						if alt.Alternate != 0 {
 							fmt.Printf("USB DEBUG: trying fallback alt 0 for intf %d\n", intfDesc.Number)
 							intf, err = d.usbc.Interface(intfDesc.Number, 0)
 							if err != nil {
@@ -156,7 +164,7 @@ func (d *Device) OpenBulkEndpoints() (in *gousb.InEndpoint, out *gousb.OutEndpoi
 					in, out, _ = d.findEndpoints(intf)
 					if in != nil && out != nil {
 						d.prepareDataInterface(intf)
-						fmt.Printf("USB DEBUG: Found bulk endpoints on intf %d alt %d\n", intfDesc.Number, alt.Number)
+						fmt.Printf("USB DEBUG: Found bulk endpoints on intf %d alt %d\n", intfDesc.Number, intf.Setting.Alternate)
 						d.dataIntf = intf
 						return in, out, nil
 					} else {
@@ -210,4 +218,9 @@ func (d *Device) findEndpoints(intf *gousb.Interface) (*gousb.InEndpoint, *gousb
 		return nil, nil, fmt.Errorf("missing endpoints")
 	}
 	return in, out, nil
+}
+
+// isADB reports the Android Debug Bridge function (class 0xFF, subclass 0x42, protocol 0x01).
+func isADB(alt gousb.InterfaceSetting) bool {
+	return uint8(alt.Class) == 0xFF && uint8(alt.SubClass) == 0x42 && uint8(alt.Protocol) == 0x01
 }
