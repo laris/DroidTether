@@ -151,8 +151,19 @@ func (d *Daemon) Run() error {
 			} else {
 				log.Info().Str("component", "daemon").Str("mtu", mtuStr).Msg("✨ Network auto-configured! Ping should now work natively!")
 
-				// Inject default route if configured
-				if d.cfg.Route.SetDefaultRoute {
+				armWatchdogs := func() {
+					watchdogStarted.Do(func() {
+						d.startConfigWatchdog(sessionCtx, iface, client, gateway, mtuStr)
+						go d.startLinkWatchdog(sessionCtx, relay, gateway, client)
+					})
+				}
+
+				// Inject default route if configured, unless egress is parked.
+				if d.cfg.Route.SetDefaultRoute && parked() {
+					log.Info().Str("component", "daemon").Str("file", ParkedFile).
+						Msg("Egress parked — tunnel is up but not taking the default route")
+					armWatchdogs()
+				} else if d.cfg.Route.SetDefaultRoute {
 					log.Info().Str("component", "daemon").Msg("Rerouting all system traffic through DroidTether...")
 					if err := iface.SetDefaultRoute(gateway); err != nil {
 						log.Warn().Str("component", "daemon").Err(err).Msg("Failed to set default route")
@@ -175,10 +186,7 @@ func (d *Daemon) Run() error {
 					// macOS standby can silently remove everything we just
 					// injected while the USB session survives (no DHCP
 					// re-fire). Arm the watchdog that re-applies on drift.
-					watchdogStarted.Do(func() {
-						d.startConfigWatchdog(sessionCtx, iface, client, gateway, mtuStr)
-						go d.startLinkWatchdog(sessionCtx, relay, gateway, client)
-					})
+					armWatchdogs()
 				}
 			}
 		}

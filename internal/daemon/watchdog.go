@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -21,6 +22,19 @@ import (
 // This watchdog verifies every few seconds that the injected config is still
 // in place and re-applies whatever is missing. All checks are local
 // syscalls/commands (route/ifconfig/scutil) — zero carrier data.
+
+// ParkedFile, while it exists, tells the daemon not to hold the system egress:
+// it keeps the tunnel up but neither installs nor restores the split default
+// routes and DNS registration. An external controller selects another uplink
+// by creating it (the tether tool's `egress ios|wifi`) and hands egress back
+// by deleting it (`egress android`, `droid on|off`). Without it the config
+// watchdog undoes that selection within one interval.
+const ParkedFile = "/var/run/droidtether.parked"
+
+func parked() bool {
+	_, err := os.Stat(ParkedFile)
+	return err == nil
+}
 
 // routeIntact reports whether the split default routes (0.0.0.0/1 and
 // 128.0.0.0/1) are still installed on the given utun interface.
@@ -121,6 +135,7 @@ func (d *Daemon) startConfigWatchdog(ctx context.Context, iface tun.Interface, l
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		wasParked := false
 
 		for {
 			select {
@@ -145,6 +160,20 @@ func (d *Daemon) startConfigWatchdog(ctx context.Context, iface tun.Interface, l
 			}
 
 			if !d.cfg.Route.SetDefaultRoute {
+				continue
+			}
+
+			if p := parked(); p != wasParked {
+				wasParked = p
+				if p {
+					log.Info().Str("component", "watchdog").Str("file", ParkedFile).
+						Msg("Egress parked — not restoring routes/DNS until the park file is removed")
+				} else {
+					log.Info().Str("component", "watchdog").
+						Msg("Egress unparked — restoring routes/DNS if missing")
+				}
+			}
+			if wasParked {
 				continue
 			}
 
